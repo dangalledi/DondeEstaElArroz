@@ -3,6 +3,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import relationship
 from .db import Base
+import datetime
 
 class Categoria(Base):
     __tablename__ = "categorias"
@@ -93,7 +94,7 @@ class Lote(Base):
 class Movimiento(Base):
     __tablename__ = "movimientos"
     id = Column(Integer, primary_key=True)
-    timestamp = Column(Text, nullable=False)  # default lo pone SQLite
+    timestamp = Column(Text, nullable=False, default=lambda: datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"))
     tipo = Column(Text, nullable=False)       # COMPRA/CONSUMO/AJUSTE...
 
     producto_id = Column(Integer, ForeignKey("productos.id"), nullable=False)
