@@ -1,6 +1,46 @@
 from pydantic import BaseModel, Field
 from typing import Optional, List
 
+class CategoriaCreate(BaseModel):
+    nombre: str
+
+class CategoriaOut(BaseModel):
+    id: int
+    nombre: str
+    class Config:
+        from_attributes = True
+
+class UbicacionCreate(BaseModel):
+    nombre: str
+
+class UbicacionOut(BaseModel):
+    id: int
+    nombre: str
+    class Config:
+        from_attributes = True
+
+class ProductoNombreCreate(BaseModel):
+    idioma: str = Field(examples=["ca", "es", "en"])
+    tipo: str = Field(default="ALIAS", examples=["ALIAS", "DISPLAY"])
+    nombre: str
+    prioridad: int = Field(default=0)
+
+class ProductoNombreOut(BaseModel):
+    id: int
+    producto_id: int
+    idioma: str
+    tipo: str
+    nombre: str
+    prioridad: int
+    class Config:
+        from_attributes = True
+
+class StockItem(BaseModel):
+    producto_id: int
+    nombre_canonico: str
+    stock_actual: int
+    stock_minimo: int
+
 class ProductoCreate(BaseModel):
     categoria_id: int
     nombre_canonico: str

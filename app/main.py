@@ -6,8 +6,6 @@ from .db import get_db
 from .utils import normalize_text
 from . import models, schemas
 
-from fastapi import FastAPI
-
 DESCRIPTION = """
 API de inventario doméstico (Raspberry Pi).
 
@@ -30,10 +28,48 @@ app = FastAPI(
 )
 
 app.openapi_tags = [
+    {"name": "Categorias", "description": "Gestión de categorías de productos."},
+    {"name": "Ubicaciones", "description": "Gestión de ubicaciones de almacenaje."},
     {"name": "Productos", "description": "Catálogo canónico + alias multiidioma."},
     {"name": "Tickets", "description": "Inbox → Review → Commit."},
     {"name": "Inventario", "description": "Consumo y ajustes por conteo."},
 ]
+
+# -------------------------
+# Categorias
+# -------------------------
+@app.post("/categorias", response_model=schemas.CategoriaOut, tags=["Categorias"], summary="Crear categoría")
+def crear_categoria(payload: schemas.CategoriaCreate, db: Session = Depends(get_db)):
+    exists = db.execute(select(models.Categoria).where(models.Categoria.nombre == payload.nombre.strip())).scalar_one_or_none()
+    if exists:
+        return exists
+    c = models.Categoria(nombre=payload.nombre.strip())
+    db.add(c)
+    db.commit()
+    db.refresh(c)
+    return c
+
+@app.get("/categorias", response_model=list[schemas.CategoriaOut], tags=["Categorias"], summary="Listar categorías")
+def listar_categorias(db: Session = Depends(get_db)):
+    return db.execute(select(models.Categoria).order_by(models.Categoria.nombre)).scalars().all()
+
+# -------------------------
+# Ubicaciones
+# -------------------------
+@app.post("/ubicaciones", response_model=schemas.UbicacionOut, tags=["Ubicaciones"], summary="Crear ubicación")
+def crear_ubicacion(payload: schemas.UbicacionCreate, db: Session = Depends(get_db)):
+    exists = db.execute(select(models.Ubicacion).where(models.Ubicacion.nombre == payload.nombre.strip())).scalar_one_or_none()
+    if exists:
+        return exists
+    u = models.Ubicacion(nombre=payload.nombre.strip())
+    db.add(u)
+    db.commit()
+    db.refresh(u)
+    return u
+
+@app.get("/ubicaciones", response_model=list[schemas.UbicacionOut], tags=["Ubicaciones"], summary="Listar ubicaciones")
+def listar_ubicaciones(db: Session = Depends(get_db)):
+    return db.execute(select(models.Ubicacion).order_by(models.Ubicacion.nombre)).scalars().all()
 
 # -------------------------
 # Productos
@@ -71,6 +107,68 @@ def crear_producto(payload: schemas.ProductoCreate, db: Session = Depends(get_db
 @app.get("/productos", response_model=list[schemas.ProductoOut], tags=["Productos"])
 def listar_productos(db: Session = Depends(get_db)):
     return db.execute(select(models.Producto).order_by(models.Producto.nombre_canonico)).scalars().all()
+
+@app.get(
+    "/productos/{producto_id}",
+    response_model=schemas.ProductoOut,
+    tags=["Productos"],
+    summary="Obtener producto por ID",
+)
+def get_producto(producto_id: int, db: Session = Depends(get_db)):
+    p = db.execute(select(models.Producto).where(models.Producto.id == producto_id)).scalar_one_or_none()
+    if not p:
+        raise HTTPException(404, "Producto no encontrado")
+    return p
+
+@app.post(
+    "/productos/{producto_id}/alias",
+    response_model=schemas.ProductoNombreOut,
+    tags=["Productos"],
+    summary="Añadir alias/nombre a un producto",
+    description="Permite guardar nombres en distintos idiomas (ca/es/en) para un producto canónico.",
+)
+def add_alias(producto_id: int, payload: schemas.ProductoNombreCreate, db: Session = Depends(get_db)):
+    p = db.execute(select(models.Producto).where(models.Producto.id == producto_id)).scalar_one_or_none()
+    if not p:
+        raise HTTPException(404, "Producto no encontrado")
+    nombre_norm = normalize_text(payload.nombre)
+    existing = db.execute(
+        select(models.ProductoNombre).where(
+            models.ProductoNombre.producto_id == producto_id,
+            models.ProductoNombre.nombre_norm == nombre_norm,
+            models.ProductoNombre.idioma == payload.idioma,
+        )
+    ).scalar_one_or_none()
+    if existing:
+        return existing
+    alias = models.ProductoNombre(
+        producto_id=producto_id,
+        idioma=payload.idioma,
+        tipo=payload.tipo,
+        nombre=payload.nombre.strip(),
+        nombre_norm=nombre_norm,
+        prioridad=payload.prioridad,
+    )
+    db.add(alias)
+    db.commit()
+    db.refresh(alias)
+    return alias
+
+@app.get(
+    "/productos/{producto_id}/alias",
+    response_model=list[schemas.ProductoNombreOut],
+    tags=["Productos"],
+    summary="Listar alias de un producto",
+)
+def listar_alias(producto_id: int, db: Session = Depends(get_db)):
+    p = db.execute(select(models.Producto).where(models.Producto.id == producto_id)).scalar_one_or_none()
+    if not p:
+        raise HTTPException(404, "Producto no encontrado")
+    return db.execute(
+        select(models.ProductoNombre)
+        .where(models.ProductoNombre.producto_id == producto_id)
+        .order_by(models.ProductoNombre.idioma, models.ProductoNombre.prioridad.desc())
+    ).scalars().all()
 
 def resolve_producto_id(db: Session, user_text: str) -> int:
     q = normalize_text(user_text)
@@ -353,6 +451,40 @@ def set_stock(payload: schemas.SetReq, db: Session = Depends(get_db)):
         .where(models.Lote.producto_id == producto_id)
     ).scalar_one()
     return {"ok": True, "delta": delta, "stock": int(new_total)}
+
+
+@app.get(
+    "/inventario/stock",
+    tags=["Inventario"],
+    response_model=list[schemas.StockItem],
+    summary="Consultar stock actual",
+    description="Devuelve el stock actual de todos los productos (o filtra por `producto`).",
+)
+def get_stock(producto_query: str | None = None, db: Session = Depends(get_db)):
+    stmt = (
+        select(
+            models.Producto.id,
+            models.Producto.nombre_canonico,
+            models.Producto.stock_minimo,
+            func.coalesce(func.sum(models.Lote.cantidad_actual), 0).label("stock_actual"),
+        )
+        .outerjoin(models.Lote, models.Lote.producto_id == models.Producto.id)
+        .group_by(models.Producto.id)
+        .order_by(models.Producto.nombre_canonico)
+    )
+    if producto_query:
+        producto_id = resolve_producto_id(db, producto_query)
+        stmt = stmt.where(models.Producto.id == producto_id)
+    rows = db.execute(stmt).all()
+    return [
+        {
+            "producto_id": r.id,
+            "nombre_canonico": r.nombre_canonico,
+            "stock_actual": int(r.stock_actual),
+            "stock_minimo": r.stock_minimo,
+        }
+        for r in rows
+    ]
 
 
 @app.get("/health", tags=["Sistema"], response_model=schemas.OkOut)
